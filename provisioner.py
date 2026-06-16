@@ -11,7 +11,7 @@ import requests
 from config import (
     GITLAB_URL, GITLAB_PAT, GITHUB_PAT,
     GIT_SYNC_USER, GIT_SYNC_EMAIL,
-    SYNC_BRANCH_PREFIX, GITLAB_RUNNER_TAG,
+    SYNC_BRANCH_PREFIX, SYNC_SOURCE_BRANCH, GITLAB_RUNNER_TAG,
     TEMPLATE_PROJECT_ID, TEMPLATE_PROJECT_REF,
 )
 
@@ -97,7 +97,7 @@ def get_all_groups() -> list[dict]:
     groups = []
     page = 1
     while True:
-        url, _ = _gl(f"/groups?per_page=100&page={page}&order_by=full_path&sort=asc&all_available=true")
+        url, _ = _gl(f"/groups?per_page=100&page={page}&all_available=true")
         resp = session.get(url, timeout=15)
         _raise(resp, "list groups")
         batch = resp.json()
@@ -175,6 +175,8 @@ def create_project(repo_info: dict, group_id: int, project_name: str) -> dict:
 def enable_push_mirror(project_id: int, github_full_name: str) -> dict:
     """
     Configure GitLab to push-mirror this project to the GitHub repo.
+    Only protected branches are mirrored — this prevents github-sync/* temp
+    branches from leaking to GitHub during MR workflows.
     Returns the mirror config dict.
     """
     mirror_url = f"https://oauth2:{GITHUB_PAT}@github.com/{github_full_name}.git"
@@ -183,13 +185,47 @@ def enable_push_mirror(project_id: int, github_full_name: str) -> dict:
     payload = {
         "url": mirror_url,
         "enabled": True,
-        "only_protected_branches": False,
+        "only_protected_branches": True,   # ← prevents temp sync branches leaking to GitHub
         "keep_divergent_refs": True,
     }
 
     resp = session.post(url, json=payload, timeout=15)
     _raise(resp, "enable push mirror")
     return resp.json()
+
+# ---------------------------------------------------------------------------
+# Step 3b — Protect the default branch
+# ---------------------------------------------------------------------------
+
+def protect_default_branch(project_id: int, branch: str) -> None:
+    """
+    Mark the default branch (e.g. 'main') as protected in GitLab.
+    This is required for two reasons:
+      1. Push mirror is set to only_protected_branches=True — if the default
+         branch is not protected, it won't be mirrored to GitHub at all.
+      2. Prevents accidental force-pushes to the main branch.
+
+    Protection rules set:
+      - Maintainers can push directly
+      - Developers can merge (via MR)
+      - No one can force-push
+    """
+    # First check if protection already exists (GitLab auto-protects 'main' on some versions)
+    check_url, _ = _gl(f"/projects/{project_id}/protected_branches/{branch}")
+    check_resp = session.get(check_url, timeout=15)
+
+    if check_resp.status_code == 200:
+        # Already protected — nothing to do
+        return
+
+    url, _ = _gl(f"/projects/{project_id}/protected_branches")
+    resp = session.post(url, json={
+        "name":                      branch,
+        "push_access_level":         40,   # 40 = Maintainer
+        "merge_access_level":        30,   # 30 = Developer
+        "allow_force_push":          False,
+    }, timeout=15)
+    _raise(resp, f"protect branch '{branch}'")
 
 
 # ---------------------------------------------------------------------------
@@ -260,11 +296,14 @@ def _get_template_project_path() -> str:
 # Variables that are the same for every project.
 # GITHUB_REPO is intentionally NOT here — it is set per-project in the next function.
 FIXED_VARIABLES = [
-    {"key": "GITHUB_PAT",          "value": GITHUB_PAT,          "masked": True,  "protected": False},
-    {"key": "GITLAB_PAT",          "value": GITLAB_PAT,          "masked": True,  "protected": False},
+    # Sensitive tokens — Protected + Masked (matches your existing project config)
+    {"key": "GITHUB_PAT",          "value": GITHUB_PAT,          "masked": True,  "protected": True},
+    {"key": "GITLAB_PAT",          "value": GITLAB_PAT,          "masked": True,  "protected": True},
+    # Identity + pipeline settings — not masked, not protected
     {"key": "GIT_SYNC_USER",       "value": GIT_SYNC_USER,       "masked": False, "protected": False},
     {"key": "GIT_SYNC_EMAIL",      "value": GIT_SYNC_EMAIL,      "masked": False, "protected": False},
     {"key": "SYNC_BRANCH_PREFIX",  "value": SYNC_BRANCH_PREFIX,  "masked": False, "protected": False},
+    {"key": "SYNC_SOURCE_BRANCH",  "value": SYNC_SOURCE_BRANCH,  "masked": False, "protected": False},
     {"key": "GITLAB_RUNNER_TAG",   "value": GITLAB_RUNNER_TAG,   "masked": False, "protected": False},
 ]
 
@@ -338,16 +377,16 @@ def configure_project_settings(project_id: int) -> None:
 def provision(
     github_url: str,
     group_id: int,
-    project_name: str,
     progress_callback=None,
 ) -> dict:
     """
     Full provisioning flow. Calls progress_callback(step, total, message) at each step.
+    Project name is always derived from the GitHub repo name for consistency.
     Returns {"project_url": "...", "project_id": ..., "steps_completed": [...]}
     """
     def progress(step, msg):
         if progress_callback:
-            progress_callback(step, 6, msg)
+            progress_callback(step, 7, msg)
 
     steps_completed = []
 
@@ -355,6 +394,9 @@ def provision(
     progress(0, "Validating GitHub repository access...")
     repo_info = validate_github_repo(github_url)
     steps_completed.append("GitHub repo validated")
+
+    # Project name always == GitHub repo name (enforced for consistency)
+    project_name = repo_info["repo"]
 
     # Derive the clean GitHub HTTPS URL for the CI variable
     github_repo_var_value = f"https://github.com/{repo_info['full_name']}.git"
@@ -365,32 +407,38 @@ def provision(
     steps_completed.append(f"Project created (ID: {project['id']})")
 
     # ── Step 2: Push mirror ───────────────────────────────────────────────
-    progress(2, "Enabling push mirroring back to GitHub...")
+    progress(2, "Enabling push mirroring to GitHub (protected branches only)...")
     enable_push_mirror(project["id"], repo_info["full_name"])
-    steps_completed.append("Push mirror enabled")
+    steps_completed.append("Push mirror enabled (protected branches only)")
 
-    # ── Step 3: CI/CD pipeline file ───────────────────────────────────────
-    progress(3, "Deploying .gitlab-ci.yml (template include)...")
+    # ── Step 3: Protect default branch ───────────────────────────────────
+    default_branch = project.get("default_branch") or "main"
+    progress(3, f"Protecting default branch '{default_branch}'...")
+    protect_default_branch(project["id"], default_branch)
+    steps_completed.append(f"Branch '{default_branch}' protected (pushes to GitHub, blocks force-push)")
+
+    # ── Step 4: CI/CD pipeline file ───────────────────────────────────────
+    progress(4, "Deploying .gitlab-ci.yml (template include)...")
     deploy_ci_file(project)
     steps_completed.append(".gitlab-ci.yml deployed")
 
-    # ── Step 4: CI/CD variables ───────────────────────────────────────────
-    progress(4, "Creating CI/CD variables...")
+    # ── Step 5: CI/CD variables ───────────────────────────────────────────
+    progress(5, "Creating CI/CD variables...")
     created_vars = create_ci_variables(project["id"], github_repo_var_value)
     steps_completed.append(f"Variables created: {', '.join(created_vars)}")
 
-    # ── Step 5: Project settings ──────────────────────────────────────────
-    progress(5, "Applying project settings...")
+    # ── Step 6: Project settings ──────────────────────────────────────────
+    progress(6, "Applying project settings...")
     configure_project_settings(project["id"])
     steps_completed.append("Project settings configured")
 
-    progress(6, "Done!")
+    progress(7, "Done!")
 
     return {
         "project_url":      project["web_url"],
         "project_id":       project["id"],
         "project_path":     project["path_with_namespace"],
-        "default_branch":   project.get("default_branch", "main"),
+        "default_branch":   default_branch,
         "steps_completed":  steps_completed,
         "github_repo":      repo_info["full_name"],
     }

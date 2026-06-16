@@ -75,17 +75,13 @@ HTML = """<!DOCTYPE html>
   <div class="card-body">
     <label for="github_url">GitHub Repository URL</label>
     <input type="text" id="github_url" placeholder="https://github.com/client-org/repo-name" autocomplete="off">
-    <p class="hint">Full URL of the GitHub repo to import. Your GitHub PAT must have access to it.</p>
+    <p class="hint">Full URL of the GitHub repo to import. Your GitHub PAT must have access to it. The GitLab project name will match the GitHub repo name.</p>
 
     <label for="group_id">Target GitLab Group</label>
     <select id="group_id">
       <option value="">Loading groups…</option>
     </select>
     <p class="hint">The project will be created inside this group.</p>
-
-    <label for="project_name">GitLab Project Name</label>
-    <input type="text" id="project_name" placeholder="Auto-filled from repo name" autocomplete="off">
-    <p class="hint">Leave blank to use the GitHub repo name as-is.</p>
 
     <button class="btn" id="provision-btn" onclick="startProvision()">
       <span>Provision Project</span>
@@ -100,19 +96,6 @@ HTML = """<!DOCTYPE html>
 
 <script>
   let pollTimer = null;
-
-  // Auto-fill project name from GitHub URL
-  document.getElementById('github_url').addEventListener('input', function() {
-    const url = this.value.trim();
-    const match = url.match(/github\\.com\\/[^\\/]+\\/([^\\/\\.]+)/);
-    const nameField = document.getElementById('project_name');
-    if (match && !nameField._userEdited) {
-      nameField.value = match[1];
-    }
-  });
-  document.getElementById('project_name').addEventListener('input', function() {
-    this._userEdited = this.value.trim() !== '';
-  });
 
   // Load groups on page load
   window.addEventListener('load', loadGroups);
@@ -141,9 +124,8 @@ HTML = """<!DOCTYPE html>
   }
 
   function startProvision() {
-    const githubUrl   = document.getElementById('github_url').value.trim();
-    const groupId     = document.getElementById('group_id').value;
-    const projectName = document.getElementById('project_name').value.trim();
+    const githubUrl = document.getElementById('github_url').value.trim();
+    const groupId   = document.getElementById('group_id').value;
 
     if (!githubUrl) { alert('Please enter a GitHub repository URL.'); return; }
     if (!groupId)   { alert('Please select a target GitLab group.'); return; }
@@ -158,7 +140,7 @@ HTML = """<!DOCTYPE html>
     fetch('/api/provision', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ github_url: githubUrl, group_id: parseInt(groupId), project_name: projectName }),
+      body: JSON.stringify({ github_url: githubUrl, group_id: parseInt(groupId) }),
     })
     .then(r => r.json())
     .then(data => {
@@ -168,7 +150,6 @@ HTML = """<!DOCTYPE html>
         document.getElementById('provision-btn').disabled = false;
         return;
       }
-      // Start polling for progress
       pollProgress(data.job_id);
     })
     .catch(err => {
@@ -182,7 +163,6 @@ HTML = """<!DOCTYPE html>
       fetch('/api/job/' + jobId)
         .then(r => r.json())
         .then(data => {
-          // Sync the displayed steps
           const list = document.getElementById('steps-list');
           list.innerHTML = '';
           data.steps.forEach((s, i) => {
@@ -279,18 +259,13 @@ def api_groups():
 @app.route("/api/provision", methods=["POST"])
 def api_provision():
     data = request.get_json()
-    github_url   = (data.get("github_url") or "").strip()
-    group_id     = data.get("group_id")
-    project_name = (data.get("project_name") or "").strip()
+    github_url = (data.get("github_url") or "").strip()
+    group_id   = data.get("group_id")
 
     if not github_url:
         return jsonify({"error": "github_url is required"}), 400
     if not group_id:
         return jsonify({"error": "group_id is required"}), 400
-
-    # If no name given, derive from the URL
-    if not project_name:
-        project_name = github_url.rstrip("/").rstrip(".git").split("/")[-1]
 
     job_id = str(uuid.uuid4())
     with jobs_lock:
@@ -305,7 +280,6 @@ def api_provision():
             result = provisioner.provision(
                 github_url=github_url,
                 group_id=group_id,
-                project_name=project_name,
                 progress_callback=on_progress,
             )
             with jobs_lock:

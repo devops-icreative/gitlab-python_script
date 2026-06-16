@@ -1,40 +1,49 @@
-# =============================================================================
-# GITLAB PROVISIONER — CONFIGURATION
-# =============================================================================
-# Fill in every value marked with  ← FILL THIS IN  before starting the app.
-# After editing this file, restart the service:
-#   sudo systemctl restart gitlab-provisioner
-# =============================================================================
+"""
+config.py — Loads all settings from the .env file.
+Do not put actual values here. Edit the .env file instead.
+"""
 
-# --- GitLab connection ---
-GITLAB_URL      = "http://gitlab.local"          # ← Change to your final domain when hosted
-GITLAB_PAT      = "glpat-XXXXXXXXXXXXXXXXXXXX"   # ← FILL THIS IN (your GitLab personal access token, needs api + write_repository scope)
+import os
+from pathlib import Path
+from dotenv import load_dotenv
 
-# --- GitHub credentials ---
-GITHUB_PAT      = "ghp_XXXXXXXXXXXXXXXXXXXX"     # ← FILL THIS IN (your GitHub personal access token, needs repo scope)
+# Load .env from the project root (same folder as this file)
+load_dotenv(Path(__file__).parent / ".env")
 
-# --- Git identity used by the sync runner ---
-GIT_SYNC_USER   = "Sync Bot"                     # ← FILL THIS IN (e.g. "GitLab Sync Bot")
-GIT_SYNC_EMAIL  = "sync@yourcompany.com"         # ← FILL THIS IN (e.g. "gitlab-sync@yourcompany.com")
+def _require(key: str) -> str:
+    """Get an env variable, raise a clear error if it's missing or empty."""
+    val = os.getenv(key, "").strip()
+    if not val:
+        raise EnvironmentError(
+            f"\n\n  Missing required config: '{key}' is not set in your .env file.\n"
+            f"  Open .env and fill in the value for {key}.\n"
+        )
+    return val
 
-# --- Sync pipeline settings ---
-SYNC_BRANCH_PREFIX = "github-sync"               # ← Change only if you use a different prefix (default: github-sync)
-GITLAB_RUNNER_TAG  = "sync"                      # ← FILL THIS IN (the tag on your GitLab runner that runs sync jobs)
+def _optional(key: str, default: str = "") -> str:
+    return os.getenv(key, default).strip()
 
-# --- Central CI template project ---
-# After you manually create the template project in GitLab (see SETUP_GUIDE.md Step 1),
-# paste its numeric project ID here.
-# Find it: GitLab project page → Settings → General → Project ID (shown at the top)
-TEMPLATE_PROJECT_ID = ""                         # ← FILL THIS IN (e.g. "3")
-TEMPLATE_PROJECT_REF = "main"                    # ← Branch in the template project where .gitlab-ci.yml lives
+# --- GitLab ---
+GITLAB_URL          = _require("GITLAB_URL").rstrip("/")
+GITLAB_PAT          = _require("GITLAB_PAT")
 
-# --- Web UI settings ---
-# The provisioner web UI will run on this port.
-# Make sure this port is open in your firewall (or only accessible internally).
-PROVISIONER_PORT = 5001
-PROVISIONER_HOST = "0.0.0.0"                     # 0.0.0.0 = accessible from any machine on the network
+# --- GitHub ---
+GITHUB_PAT          = _require("GITHUB_PAT")
 
-# --- GitLab group structure ---
-# When a new project is created, it goes into a group.
-# The UI shows a dropdown of all existing groups. This is the default pre-selected one.
-DEFAULT_GROUP_PATH = ""                          # ← FILL THIS IN (e.g. "clients" — the top-level group slug)
+# --- Git identity ---
+GIT_SYNC_USER       = _require("GIT_SYNC_USER")
+GIT_SYNC_EMAIL      = _require("GIT_SYNC_EMAIL")
+
+# --- Sync settings ---
+SYNC_BRANCH_PREFIX  = _require("SYNC_BRANCH_PREFIX")
+SYNC_SOURCE_BRANCH  = _require("SYNC_SOURCE_BRANCH")
+GITLAB_RUNNER_TAG   = _require("GITLAB_RUNNER_TAG")
+
+# --- Template project ---
+TEMPLATE_PROJECT_ID  = _require("TEMPLATE_PROJECT_ID")
+TEMPLATE_PROJECT_REF = _optional("TEMPLATE_PROJECT_REF", "main")
+
+# --- Web UI ---
+PROVISIONER_PORT    = int(_optional("PROVISIONER_PORT", "5001"))
+PROVISIONER_HOST    = "0.0.0.0"
+DEFAULT_GROUP_PATH  = _optional("DEFAULT_GROUP_PATH", "")
