@@ -1,0 +1,19 @@
+[Unit]
+Description=GitLab Provisioner Web UI
+After=network.target
+
+[Service]
+# ── Change these two lines to match your server ──
+User=ubuntu
+WorkingDirectory=/opt/gitlab-provisioner
+
+ExecStart=/opt/gitlab-provisioner/venv/bin/python app.py
+Restart=always
+RestartSec=5
+
+# Log to journald (view with: journalctl -u gitlab-provisioner -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
