@@ -365,7 +365,7 @@ def configure_project_settings(project_id: int) -> None:
     resp = session.put(url, json={
         "only_allow_merge_if_pipeline_succeeds": False,
         "remove_source_branch_after_merge": True,
-        "shared_runners_enabled": False,
+        "shared_runners_enabled": True,
     }, timeout=15)
     _raise(resp, "configure project settings")
 
